@@ -29,6 +29,15 @@ pub struct MyApp {
 }
 
 impl MyApp {
+    /// 清空当前所有数据和缓存
+    fn clear_data(&mut self) {
+        self.projects.clear();
+        self.batch_appid.clear();
+        self.batch_projectname.clear();
+        self.batch_douyin_ids.clear();
+        self.status_msg.clear();
+    }
+
     /// 应用程序初始化
     /// 在此配置 egui 上下文、字体和安装必要的扩展（如图片加载器）
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -157,10 +166,15 @@ impl MyApp {
     /// 仅针对存在 JS 配置的项目
     fn apply_batch_douyin_ids(&mut self) {
         if self.batch_douyin_ids.trim().is_empty() { return; }
+        
+        // 移除所有空格和换行
+        let cleaned_ids = self.batch_douyin_ids.replace(|c: char| c.is_whitespace(), "");
+        self.batch_douyin_ids = cleaned_ids.clone();
+
         for item in &mut self.projects {
             if item.selected {
                 if let Some(js) = &mut item.js_config {
-                    js.douyin_ids_str = self.batch_douyin_ids.clone();
+                    js.douyin_ids_str = cleaned_ids.clone();
                     item.is_modified = true;
                 }
             }
@@ -182,6 +196,7 @@ impl eframe::App for MyApp {
                     if ui.button("📂 选择根目录").clicked() {
                         // 打开文件夹选择对话框
                         if let Some(path) = FileDialog::new().pick_folder() {
+                            self.clear_data();
                             self.root_path = Some(path);
                             self.scan();
                         }
@@ -195,7 +210,13 @@ impl eframe::App for MyApp {
             
             // 显示当前路径
             if let Some(path) = &self.root_path {
-                ui.small(format!("当前路径: {}", path.display()));
+                ui.horizontal(|ui| {
+                    ui.small(format!("当前路径: {}", path.display()));
+                    if ui.button("📁 打开").clicked() {
+                        // 使用系统默认文件管理器打开目录
+                        let _ = open::that(path);
+                    }
+                });
             }
             
             ui.separator();
@@ -307,6 +328,8 @@ impl eframe::App for MyApp {
                                         }
                                         ui.label(egui::RichText::new("Douyin IDs").small());
                                         if ui.text_edit_singleline(&mut js_config.douyin_ids_str).changed() {
+                                            // 自动移除空格和换行
+                                            js_config.douyin_ids_str = js_config.douyin_ids_str.replace(|c: char| c.is_whitespace(), "");
                                             item.is_modified = true;
                                         }
                                     });
