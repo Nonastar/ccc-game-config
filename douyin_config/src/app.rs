@@ -2,8 +2,12 @@ use crate::model::ProjectItem;
 use crate::scanner;
 use eframe::egui;
 use rfd::FileDialog;
-use std::path::PathBuf;
-use std::fs;
+use std::path::{Path, PathBuf};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use walkdir::WalkDir;
+use zip::write::SimpleFileOptions;
+use zip::ZipWriter;
 
 /// 应用程序的主状态结构体
 /// 维护了整个应用程序的生命周期、数据和 UI 状态
@@ -181,12 +185,112 @@ impl MyApp {
         }
         self.status_msg = "已批量应用 DouyinIDs (仅JS)，请点击保存生效。".to_string();
     }
+
+    /// 将项目目录打包为 ZIP 压缩包
+    fn build_zip(&mut self, index: usize) {
+        let item = &self.projects[index];
+        // 获取 project.config.json 所在的目录
+        let config_dir = match item.path.parent() {
+            Some(p) => p,
+            None => {
+                self.status_msg = "错误：无法获取配置文件所在目录".to_string();
+                return;
+            }
+        };
+
+        // 打包父目录：获取 config_dir 的父目录
+        let project_root = match config_dir.parent() {
+            Some(p) => p,
+            None => {
+                // 如果没有父目录（即 config_dir 已经是根目录），则回退到 config_dir
+                config_dir
+            }
+        };
+
+        let project_name = if item.config.projectname.is_empty() {
+            project_root.file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".to_string())
+        } else {
+            item.config.projectname.clone()
+        };
+
+        let zip_filename = format!("{}.zip", project_name);
+        // 压缩包放在 project_root 的同级目录下
+        let zip_path = match project_root.parent() {
+            Some(p) => p.join(&zip_filename),
+            None => project_root.join(&zip_filename),
+        };
+
+        self.status_msg = format!("正在打包父目录: {} ...", zip_filename);
+
+        match self.create_zip(project_root, &zip_path) {
+            Ok(_) => {
+                self.status_msg = format!("打包成功: {}", zip_path.display());
+                // 自动打开所在的文件夹
+                if let Some(parent) = zip_path.parent() {
+                    let _ = open::that(parent);
+                }
+            }
+            Err(e) => {
+                self.status_msg = format!("打包失败: {}", e);
+            }
+        }
+    }
+
+    /// 创建 ZIP 文件的辅助函数
+    fn create_zip(&self, src_dir: &Path, dst_file: &Path) -> anyhow::Result<()> {
+        let file = File::create(dst_file)?;
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .unix_permissions(0o755);
+
+        let mut buffer = Vec::new();
+        let mut it = WalkDir::new(src_dir).into_iter();
+
+        while let Some(entry) = it.next() {
+            let entry = entry?;
+            let path = entry.path();
+            let name = path.strip_prefix(src_dir)?;
+
+            if name.as_os_str().is_empty() {
+                continue;
+            }
+
+            // 跳过一些不必要的文件夹和文件
+            if path.is_dir() {
+                let dir_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if dir_name == "node_modules" || dir_name == ".git" || dir_name == ".svn" {
+                    it.skip_current_dir();
+                    continue;
+                }
+                
+                zip.add_directory(name.to_string_lossy(), options)?;
+            } else {
+                // 跳过当前的 zip 文件（如果它碰巧在源目录中）
+                if path == dst_file {
+                    continue;
+                }
+
+                zip.start_file(name.to_string_lossy(), options)?;
+                let mut f = File::open(path)?;
+                f.read_to_end(&mut buffer)?;
+                zip.write_all(&buffer)?;
+                buffer.clear();
+            }
+        }
+
+        zip.finish()?;
+        Ok(())
+    }
 }
 
 impl eframe::App for MyApp {
     /// 每一帧的 UI 更新函数
     /// 这里定义了整个应用程序的 UI 布局
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut zip_index = None;
         egui::CentralPanel::default().show(ctx, |ui| {
             // --- 顶部工具栏 ---
             ui.horizontal(|ui| {
@@ -300,6 +404,11 @@ impl eframe::App for MyApp {
                                     if item.is_modified {
                                         ui.label(egui::RichText::new("● 待保存").color(egui::Color32::RED));
                                     }
+                                    
+                                    ui.add_space(5.0);
+                                    if ui.button("📦 打包").clicked() {
+                                        zip_index = Some(idx);
+                                    }
                                 });
                                 
                                 // 基础信息编辑
@@ -409,5 +518,9 @@ impl eframe::App for MyApp {
                 ui.label(&self.status_msg);
             });
         });
+
+        if let Some(idx) = zip_index {
+            self.build_zip(idx);
+        }
     }
 }
